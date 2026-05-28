@@ -4,7 +4,7 @@ import { fileURLToPath } from "url";
 import logger from "./logger.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dbPath = path.join(__dirname, "..", "audit.db");
+const dbPath = process.env.DATABASE_PATH ?? path.join(__dirname, "..", "audit.db");
 
 const db = new Database(dbPath);
 db.pragma("journal_mode = WAL");
@@ -12,6 +12,19 @@ db.pragma("synchronous = NORMAL"); // safe with WAL, much faster
 db.pragma("cache_size = -64000"); // 64MB page cache
 db.pragma("foreign_keys = ON"); // enforce FK constraints
 db.pragma("temp_store = MEMORY"); // temp tables in memory
+
+// Checkpoint the WAL periodically to prevent unbounded growth.
+let _writeCount = 0;
+export function countWrite() {
+  if (++_writeCount % 100 === 0) {
+    db.pragma("wal_checkpoint(TRUNCATE)");
+  }
+}
+
+// Final checkpoint on clean shutdown.
+process.on("exit", () => db.pragma("wal_checkpoint(TRUNCATE)"));
+process.on("SIGINT", () => process.exit(0));
+// SIGTERM is handled in index.js for graceful HTTP + DB shutdown.
 
 // Initialize database schema
 export function initializeDatabase() {
@@ -28,6 +41,51 @@ export function initializeDatabase() {
       version: 1,
       sql: `/* initial schema — already applied via CREATE TABLE IF NOT EXISTS */`,
     },
+    {
+      // #133: enforce FK constraints on existing databases by recreating
+      // distribution_payouts and secondary_royalty_distributions with
+      // ON DELETE CASCADE. SQLite doesn't support ADD CONSTRAINT, so we
+      // use the rename-create-copy-drop pattern inside a transaction.
+      version: 2,
+      sql: `
+        PRAGMA foreign_keys = OFF;
+
+        BEGIN;
+
+        CREATE TABLE IF NOT EXISTS distribution_payouts_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          transactionId INTEGER NOT NULL,
+          contractId TEXT NOT NULL DEFAULT '',
+          collaboratorAddress TEXT NOT NULL,
+          amountReceived TEXT NOT NULL,
+          FOREIGN KEY(transactionId) REFERENCES transactions(id) ON DELETE CASCADE
+        );
+        INSERT OR IGNORE INTO distribution_payouts_new
+          SELECT id, transactionId, contractId, collaboratorAddress, amountReceived
+          FROM distribution_payouts;
+        DROP TABLE distribution_payouts;
+        ALTER TABLE distribution_payouts_new RENAME TO distribution_payouts;
+
+        CREATE TABLE IF NOT EXISTS secondary_royalty_distributions_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          transactionId INTEGER NOT NULL,
+          contractId TEXT NOT NULL,
+          totalRoyaltiesDistributed TEXT NOT NULL,
+          numberOfSales INTEGER NOT NULL,
+          timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(transactionId) REFERENCES transactions(id) ON DELETE CASCADE
+        );
+        INSERT OR IGNORE INTO secondary_royalty_distributions_new
+          SELECT id, transactionId, contractId, totalRoyaltiesDistributed, numberOfSales, timestamp
+          FROM secondary_royalty_distributions;
+        DROP TABLE secondary_royalty_distributions;
+        ALTER TABLE secondary_royalty_distributions_new RENAME TO secondary_royalty_distributions;
+
+        COMMIT;
+
+        PRAGMA foreign_keys = ON;
+      `,
+    },
   ];
 
   const applied = db
@@ -38,9 +96,7 @@ export function initializeDatabase() {
   for (const migration of migrations) {
     if (!applied.includes(migration.version)) {
       db.exec(migration.sql);
-      db.prepare("INSERT INTO schema_migrations (version) VALUES (?)").run(
-        migration.version,
-      );
+      db.prepare("INSERT INTO schema_migrations (version) VALUES (?)").run(migration.version);
       logger.info(`Applied migration v${migration.version}`);
     }
   }
@@ -118,11 +174,15 @@ export function initializeDatabase() {
   // Migration guards for existing databases
   try {
     db.exec(`ALTER TABLE secondary_sales ADD COLUMN distributed INTEGER NOT NULL DEFAULT 0`);
-  } catch (_) { /* column already exists */ }
+  } catch (_) {
+    /* column already exists */
+  }
 
   try {
     db.exec(`ALTER TABLE distribution_payouts ADD COLUMN contractId TEXT NOT NULL DEFAULT ''`);
-  } catch (_) { /* column already exists */ }
+  } catch (_) {
+    /* column already exists */
+  }
 }
 
 // Transaction tracking functions
@@ -135,13 +195,8 @@ export function recordTransaction(contractId, type, initiatorAddress, data) {
     VALUES (?, ?, ?, ?, ?, 'pending')
   `);
 
-  const result = stmt.run(
-    contractId,
-    type,
-    initiatorAddress,
-    requestedAmount,
-    tokenId,
-  );
+  const result = stmt.run(contractId, type, initiatorAddress, requestedAmount, tokenId);
+  countWrite();
   return result.lastInsertRowid;
 }
 
@@ -153,14 +208,10 @@ export function updateTransactionHash(transactionId, txHash) {
   `);
 
   stmt.run(txHash, transactionId);
+  countWrite();
 }
 
-export function updateTransactionStatus(
-  txHash,
-  status,
-  blockTime = null,
-  errorMessage = null,
-) {
+export function updateTransactionStatus(txHash, status, blockTime = null, errorMessage = null) {
   const stmt = db.prepare(`
     UPDATE transactions 
     SET status = ?, blockTime = ?, errorMessage = ? 
@@ -168,13 +219,14 @@ export function updateTransactionStatus(
   `);
 
   stmt.run(status, blockTime, errorMessage, txHash);
+  countWrite();
 }
 
 export function addDistributionPayout(
   transactionId,
   contractId,
   collaboratorAddress,
-  amountReceived,
+  amountReceived
 ) {
   const stmt = db.prepare(`
     INSERT INTO distribution_payouts 
@@ -183,12 +235,11 @@ export function addDistributionPayout(
   `);
 
   stmt.run(transactionId, contractId, collaboratorAddress, amountReceived);
+  countWrite();
 }
 
 export function getTransactionCount(contractId) {
-  const stmt = db.prepare(
-    `SELECT COUNT(*) as total FROM transactions WHERE contractId = ?`
-  );
+  const stmt = db.prepare(`SELECT COUNT(*) as total FROM transactions WHERE contractId = ?`);
   return stmt.get(contractId).total;
 }
 
@@ -273,7 +324,9 @@ export function getAuditLog(contractId, limit = 100, offset = 0) {
 
   return stmt.all(contractId, limit, offset).map((row) => {
     let details = null;
-    try { details = JSON.parse(row.details || "{}"); } catch (_) {}
+    try {
+      details = JSON.parse(row.details || "{}");
+    } catch (_) {}
     return { ...row, details };
   });
 }
@@ -286,6 +339,7 @@ export function addAuditLog(contractId, action, user, details) {
   `);
 
   stmt.run(contractId, action, user, JSON.stringify(details));
+  countWrite();
 }
 
 // ── Secondary Royalty Functions ──────────────────────────────────────────
@@ -322,14 +376,24 @@ export function recordSecondarySale(
     royaltyRate,
     transactionHash
   );
+  countWrite();
   return result.lastInsertRowid;
 }
 
 /**
  * Get all secondary sales for a contract with optional filtering.
  * Pass undistributedOnly=true to return only rows where distributed = 0.
+ * Supports optional date range filtering with startDate and endDate.
  */
-export function getSecondarySales(contractId, limit = 50, offset = 0, nftId = null, undistributedOnly = false) {
+export function getSecondarySales(
+  contractId,
+  limit = 50,
+  offset = 0,
+  nftId = null,
+  undistributedOnly = false,
+  startDate = null,
+  endDate = null
+) {
   let query = `
     SELECT 
       id,
@@ -357,6 +421,16 @@ export function getSecondarySales(contractId, limit = 50, offset = 0, nftId = nu
     query += ` AND distributed = 0`;
   }
 
+  if (startDate) {
+    query += ` AND timestamp >= ?`;
+    params.push(startDate);
+  }
+
+  if (endDate) {
+    query += ` AND timestamp <= ?`;
+    params.push(endDate);
+  }
+
   query += ` ORDER BY timestamp DESC LIMIT ? OFFSET ?`;
   params.push(limit, offset);
 
@@ -365,14 +439,25 @@ export function getSecondarySales(contractId, limit = 50, offset = 0, nftId = nu
 
 /**
  * Count secondary sales for a contract (ignores LIMIT/OFFSET).
+ * Supports optional date range filtering with startDate and endDate.
  */
-export function countSecondarySales(contractId, nftId = null) {
+export function countSecondarySales(contractId, nftId = null, startDate = null, endDate = null) {
   let query = `SELECT COUNT(*) as total FROM secondary_sales WHERE contractId = ?`;
   const params = [contractId];
 
   if (nftId) {
     query += ` AND nftId = ?`;
     params.push(nftId);
+  }
+
+  if (startDate) {
+    query += ` AND timestamp >= ?`;
+    params.push(startDate);
+  }
+
+  if (endDate) {
+    query += ` AND timestamp <= ?`;
+    params.push(endDate);
   }
 
   return db.prepare(query).get(...params).total;
@@ -383,7 +468,10 @@ export function countSecondarySales(contractId, nftId = null) {
  */
 export function markSalesDistributed(ids) {
   const placeholders = ids.map(() => "?").join(",");
-  db.prepare(`UPDATE secondary_sales SET distributed = 1 WHERE id IN (${placeholders})`).run(...ids);
+  db.prepare(`UPDATE secondary_sales SET distributed = 1 WHERE id IN (${placeholders})`).run(
+    ...ids
+  );
+  countWrite();
 }
 
 /**
@@ -401,12 +489,14 @@ export function recordSecondaryRoyaltyDistribution(
     VALUES (?, ?, ?, ?)
   `);
 
-  return stmt.run(
+  const result = stmt.run(
     transactionId,
     contractId,
     totalRoyaltiesDistributed.toString(),
     numberOfSales
   );
+  countWrite();
+  return result;
 }
 
 /**

@@ -1,5 +1,8 @@
 /**
- * Stellar SDK utilities for Freighter wallet integration
+ * Freighter wallet integration for signing and submitting transactions.
+ * Single responsibility: wallet interaction only.
+ * For transaction building, use stellar SDK directly.
+ * For formatting, use utils/format.ts.
  */
 
 import { TransactionBuilder, Networks, SorobanRpc } from "@stellar/stellar-sdk";
@@ -62,28 +65,4 @@ export async function signAndSubmitTransaction(
   }
 
   throw new Error(`Transaction confirmation timed out: ${hash}`);
-}
-
-
-/**
- * Format an address for display (short form)
- */
-export function formatAddress(address: string, length: number = 8): string {
-  if (!address) return "";
-  return address.substring(0, length) + "...";
-}
-
-/**
- * Format amount with decimals
- */
-export function formatAmount(
-  amount: string | number,
-  decimals: number = 2,
-): string {
-  const num = typeof amount === "string" ? parseFloat(amount) : amount;
-  if (isNaN(num)) return "0";
-  return num.toLocaleString("en-US", {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
-  });
 }

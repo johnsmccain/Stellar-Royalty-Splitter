@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { api } from "../api";
-import { useSettings } from "../context/SettingsContext";
 import { signAndSubmitTransaction } from "../stellar";
 import { useNetwork } from "../context/NetworkContext";
+import FormStatus from "./FormStatus";
+import { useFormStatus } from "../hooks/useFormStatus";
 
 
 interface Props {
@@ -16,52 +17,68 @@ export default function DistributeForm({
   walletAddress,
   onSuccess,
 }: Props) {
-  const { settings } = useSettings();
   const { network } = useNetwork();
   const [tokenId, setTokenId] = useState("");
   const [amount, setAmount] = useState("");
-  const [status, setStatus] = useState<{
-    type: "ok" | "error" | "info";
-    msg: string;
-  } | null>(null);
+  const [contractBalance, setContractBalance] = useState<string | null>(null);
+  const [balanceLoading, setBalanceLoading] = useState(false);
+  const { status, setStatus } = useFormStatus();
   const [loading, setLoading] = useState(false);
+
+  // Fetch contract balance whenever tokenId changes (debounced)
+  useEffect(() => {
+    if (!contractId || !tokenId) {
+      setContractBalance(null);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      setBalanceLoading(true);
+      try {
+        const res = await api.getContractBalance(contractId, tokenId);
+        setContractBalance(res.balance);
+      } catch {
+        setContractBalance(null);
+      } finally {
+        setBalanceLoading(false);
+      }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [contractId, tokenId]);
+
+  const parsedAmount = parseFloat(amount);
+  const parsedBalance = contractBalance !== null ? parseFloat(contractBalance) : null;
+  const exceedsBalance =
+    parsedBalance !== null && !isNaN(parsedAmount) && parsedAmount > parsedBalance;
 
   async function submit() {
     if (!contractId)
-      return setStatus({ type: "error", msg: "Enter a contract ID first." });
-    if (!tokenId || !amount)
-      return setStatus({ type: "error", msg: "Fill in token and amount." });
-
-    const numeric = parseFloat(amount);
-    if (numeric < settings.minPayoutAmount) {
-      return setStatus({ type: "error", msg: `Amount is below minimum payout (${settings.minPayoutAmount}).` });
-    }
+      return setStatus("error", "Enter a contract ID first.");
+    if (!tokenId)
+      return setStatus("error", "Enter a token address.");
+    if (!amount || isNaN(parsedAmount) || parsedAmount <= 0)
+      return setStatus("error", "Enter a valid amount.");
+    if (exceedsBalance)
+      return setStatus("error", "Amount exceeds contract balance.");
 
     setLoading(true);
-    setStatus({ type: "info", msg: "Building transaction…" });
+    setStatus("info", "Building transaction…");
 
     try {
-      const res = await api.distribute({
-        contractId,
-        walletAddress,
-        tokenId,
-        amount: parseInt(amount),
-      });
+      const res = await api.distribute({ contractId, walletAddress, tokenId });
 
-      setStatus({ type: "info", msg: "Signing transaction with Freighter..." });
+      setStatus("info", "Signing transaction with Freighter...");
       const hash = await signAndSubmitTransaction(res.xdr, network);
 
-      setStatus({ type: "info", msg: "Waiting for confirmation..." });
+      setStatus("info", "Waiting for confirmation...");
       await api.confirmTransaction(hash, {
         status: "confirmed",
         blockTime: new Date().toISOString(),
       });
 
-      setStatus({ type: "ok", msg: `Distributed. Tx: ${hash}` });
+      setStatus("ok", `Distributed. Tx: ${hash}`);
       onSuccess();
-
-    } catch (e: any) {
-      setStatus({ type: "error", msg: e.message });
+    } catch (e: unknown) {
+      setStatus("error", e instanceof Error ? e.message : "Unknown error");
     } finally {
       setLoading(false);
     }
@@ -74,19 +91,41 @@ export default function DistributeForm({
       <input
         placeholder="C..."
         value={tokenId}
-        onChange={(e) => setTokenId(e.target.value)}
+        onChange={(e) => { setTokenId(e.target.value); setAmount(""); }}
       />
-      <label>Amount (stroops)</label>
+      {tokenId && (
+        <p className="description">
+          {balanceLoading
+            ? "Fetching balance…"
+            : contractBalance !== null
+            ? `Available balance: ${contractBalance}`
+            : "Could not fetch balance."}
+        </p>
+      )}
+      <label>Amount</label>
       <input
-        placeholder="e.g. 10000000"
         type="number"
+        placeholder="0"
+        min="0"
+        max={contractBalance ?? undefined}
         value={amount}
         onChange={(e) => setAmount(e.target.value)}
+        disabled={contractBalance === null}
       />
-      <button className="btn-primary" onClick={submit} disabled={loading}>
+      {exceedsBalance && (
+        <p className="description" style={{ color: "var(--error, red)" }}>
+          Amount exceeds available balance of {contractBalance}.
+        </p>
+      )}
+      <p className="description">Distributes the specified amount to all collaborators.</p>
+      <button
+        className="btn-primary"
+        onClick={submit}
+        disabled={loading || exceedsBalance || !amount}
+      >
         {loading ? "Submitting…" : "Distribute funds"}
       </button>
-      {status && <div className={`status ${status.type}`}>{status.msg}</div>}
+      {status && <FormStatus type={status.type} message={status.message} />}
     </div>
   );
 }

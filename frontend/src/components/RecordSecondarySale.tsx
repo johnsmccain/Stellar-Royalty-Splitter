@@ -2,7 +2,11 @@ import { useState, useEffect } from "react";
 import { api } from "../api";
 import { signAndSubmitTransaction } from "../stellar";
 import { useNetwork } from "../context/NetworkContext";
+import FormStatus from "./FormStatus";
+import { useFormStatus } from "../hooks/useFormStatus";
 
+const G_ADDR = /^G[A-Z2-7]{55}$/;
+const C_ADDR = /^C[A-Z2-7]{55}$/;
 
 interface Props {
   contractId: string;
@@ -26,19 +30,15 @@ export default function RecordSecondarySale({
     saleToken: "",
   });
 
-  const [status, setStatus] = useState<{
-    type: "ok" | "error" | "info";
-    msg: string;
-  } | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const { status, setStatus } = useFormStatus();
   const [loading, setLoading] = useState(false);
-  const [calculatedRoyalty, setCalculatedRoyalty] = useState<number | null>(null);
+  const [calculatedRoyalty, setCalculatedRoyalty] = useState<bigint | null>(null);
 
-  // Update calculated royalty if royaltyRate or salePrice changes
   useEffect(() => {
-    const price = parseInt(formData.salePrice);
-    if (!isNaN(price) && price > 0) {
-      const royalty = Math.floor((price * royaltyRate) / 10000);
-      setCalculatedRoyalty(royalty);
+    const price = BigInt(parseInt(formData.salePrice) || 0);
+    if (price > 0n) {
+      setCalculatedRoyalty((price * BigInt(royaltyRate)) / 10000n);
     } else {
       setCalculatedRoyalty(null);
     }
@@ -46,24 +46,39 @@ export default function RecordSecondarySale({
 
   function updateField(field: string, value: string) {
     setFormData((prev) => ({ ...prev, [field]: value }));
+    // Clear error on change
+    if (fieldErrors[field]) {
+      setFieldErrors((prev) => ({ ...prev, [field]: "" }));
+    }
   }
+
+  function validateField(field: string, value: string) {
+    let err = "";
+    if (field === "previousOwner" || field === "newOwner") {
+      if (value && !G_ADDR.test(value)) err = "Must be a valid Stellar G-address (56 chars)";
+    } else if (field === "saleToken") {
+      if (value && !C_ADDR.test(value)) err = "Must be a valid Stellar C-address (56 chars)";
+    }
+    setFieldErrors((prev) => ({ ...prev, [field]: err }));
+  }
+
+  const isFormValid =
+    formData.nftId.trim() !== "" &&
+    G_ADDR.test(formData.previousOwner) &&
+    G_ADDR.test(formData.newOwner) &&
+    C_ADDR.test(formData.saleToken) &&
+    parseInt(formData.salePrice) > 0;
 
   async function submit() {
     if (!contractId) {
-      return setStatus({ type: "error", msg: "Enter a contract ID first." });
+      return setStatus("error", "Enter a contract ID first.");
     }
-
-    if (!formData.nftId || !formData.previousOwner || !formData.newOwner || !formData.salePrice || !formData.saleToken) {
-      return setStatus({ type: "error", msg: "Please fill in all fields." });
-    }
-
-    const salePrice = parseInt(formData.salePrice);
-    if (isNaN(salePrice) || salePrice <= 0) {
-      return setStatus({ type: "error", msg: "Sale price must be a positive number." });
+    if (!isFormValid) {
+      return setStatus("error", "Please fix all field errors before submitting.");
     }
 
     setLoading(true);
-    setStatus({ type: "info", msg: "Recording secondary sale..." });
+    setStatus("info", "Recording secondary sale...");
 
     try {
       const { xdr, royaltyAmount } = await api.recordSecondarySale({
@@ -72,42 +87,27 @@ export default function RecordSecondarySale({
         nftId: formData.nftId,
         previousOwner: formData.previousOwner,
         newOwner: formData.newOwner,
-        salePrice,
+        salePrice: parseInt(formData.salePrice),
         saleToken: formData.saleToken,
         royaltyRate,
       });
 
-      setStatus({ type: "info", msg: "Please sign the transaction..." });
-
-      // Sign and submit transaction
+      setStatus("info", "Please sign the transaction...");
       const result = await signAndSubmitTransaction(xdr, network);
 
-      setStatus({ type: "info", msg: "Waiting for confirmation..." });
+      setStatus("info", "Waiting for confirmation...");
       await api.confirmTransaction(result, {
         status: "confirmed",
         blockTime: new Date().toISOString(),
       });
 
-      setStatus({
-        type: "ok",
-        msg: `Secondary sale recorded! Royalty: ${royaltyAmount} tokens. TX: ${result}`,
-      });
+      setStatus("ok", `Secondary sale recorded! Royalty: ${royaltyAmount} tokens. TX: ${result}`);
 
-
-      setFormData({
-        nftId: "",
-        previousOwner: "",
-        newOwner: "",
-        salePrice: "",
-        saleToken: "",
-      });
+      setFormData({ nftId: "", previousOwner: "", newOwner: "", salePrice: "", saleToken: "" });
       setCalculatedRoyalty(null);
       onSuccess();
     } catch (err) {
-      setStatus({
-        type: "error",
-        msg: `Error: ${err instanceof Error ? err.message : "Unknown error"}`,
-      });
+      setStatus("error", `Error: ${err instanceof Error ? err.message : "Unknown error"}`);
     } finally {
       setLoading(false);
     }
@@ -139,8 +139,13 @@ export default function RecordSecondarySale({
             placeholder="G..."
             value={formData.previousOwner}
             onChange={(e) => updateField("previousOwner", e.target.value)}
+            onBlur={(e) => validateField("previousOwner", e.target.value)}
             disabled={loading}
+            className={fieldErrors.previousOwner ? "input-error" : ""}
           />
+          {fieldErrors.previousOwner && (
+            <span className="field-error">{fieldErrors.previousOwner}</span>
+          )}
         </div>
 
         <div className="form-group">
@@ -150,8 +155,13 @@ export default function RecordSecondarySale({
             placeholder="G..."
             value={formData.newOwner}
             onChange={(e) => updateField("newOwner", e.target.value)}
+            onBlur={(e) => validateField("newOwner", e.target.value)}
             disabled={loading}
+            className={fieldErrors.newOwner ? "input-error" : ""}
           />
+          {fieldErrors.newOwner && (
+            <span className="field-error">{fieldErrors.newOwner}</span>
+          )}
         </div>
 
         <div className="form-group">
@@ -167,7 +177,7 @@ export default function RecordSecondarySale({
               step="1"
             />
             {calculatedRoyalty !== null && (
-              <span className="calc-result">Royalty: {calculatedRoyalty}</span>
+              <span className="calc-result">Royalty: {calculatedRoyalty.toString()}</span>
             )}
           </div>
         </div>
@@ -179,18 +189,19 @@ export default function RecordSecondarySale({
             placeholder="C..."
             value={formData.saleToken}
             onChange={(e) => updateField("saleToken", e.target.value)}
+            onBlur={(e) => validateField("saleToken", e.target.value)}
             disabled={loading}
+            className={fieldErrors.saleToken ? "input-error" : ""}
           />
+          {fieldErrors.saleToken && (
+            <span className="field-error">{fieldErrors.saleToken}</span>
+          )}
         </div>
       </div>
 
-      {status && (
-        <div className={`message ${status.type}`}>
-          {status.msg}
-        </div>
-      )}
+      {status && <FormStatus type={status.type} message={status.message} />}
 
-      <button onClick={submit} disabled={loading} className="btn-primary">
+      <button onClick={submit} disabled={loading || !isFormValid} className="btn-primary">
         {loading ? "Processing..." : "Record Sale"}
       </button>
     </div>

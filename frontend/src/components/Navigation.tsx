@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useTheme } from "../context/ThemeContext";
 import { useNetwork } from "../context/NetworkContext";
 import "./Navigation.css";
@@ -21,6 +21,23 @@ export const Navigation: React.FC<NavigationProps> = ({
   const { isDark, toggleTheme } = useTheme();
   const { network, setNetwork } = useNetwork();
 
+  const navItems = [
+    { id: "dashboard", label: "Dashboard", icon: "📊" },
+    { id: "transactions", label: "Transactions", icon: "📋" },
+    { id: "admin", label: "Admin", icon: "👑" },
+    { id: "initialize", label: "Initialize", icon: "⚙️" },
+    { id: "distribute", label: "Distribute", icon: "💰" },
+    { id: "secondary", label: "Secondary", icon: "🔄" },
+    { id: "settings", label: "Settings", icon: "⚡" },
+  ];
+
+  // Issue #156 — update browser tab title whenever the active page changes
+  useEffect(() => {
+    const item = navItems.find((n) => n.id === currentPage);
+    const label = item ? item.label : currentPage;
+    document.title = `${label} - Stellar Royalty Splitter`;
+  }, [currentPage]);
+
   function copyAddress() {
     if (!walletAddress) return;
     navigator.clipboard.writeText(walletAddress);
@@ -36,16 +53,6 @@ export const Navigation: React.FC<NavigationProps> = ({
     onPageChange(page);
     setIsMobileMenuOpen(false);
   };
-
-  const navItems = [
-    { id: "dashboard", label: "Dashboard", icon: "📊" },
-    { id: "transactions", label: "Transactions", icon: "📋" },
-    { id: "admin", label: "Admin", icon: "👑" },
-    { id: "initialize", label: "Initialize", icon: "⚙️" },
-    { id: "distribute", label: "Distribute", icon: "💰" },
-    { id: "secondary", label: "Secondary Royalties", icon: "🔄" },
-    { id: "settings", label: "Settings", icon: "⚡" },
-  ];
 
   return (
     <nav className="navigation">

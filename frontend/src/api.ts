@@ -47,7 +47,7 @@ export interface AuditLogEntry {
   contractId: string;
   action: string;
   user: string | null;
-  details: Record<string, unknown> | null;
+  details: string | null;
   timestamp: string;
 }
 
@@ -66,14 +66,11 @@ export interface SecondarySale {
 
 export interface RoyaltyStats {
   totalSecondarySales: number;
-  totalRoyaltiesGenerated: string; // always 7 decimal places, never null
-  totalVolume: string;             // always 7 decimal places, never null
-  pendingRoyaltyPool: string;      // undistributed royalties, 7 decimal places
+  totalRoyaltiesGenerated: number | string;
   lastDistribution: {
     timestamp: string;
     totalRoyaltiesDistributed: string;
     numberOfSales: number;
-    txHash: string | null;
   } | null;
 }
 
@@ -99,9 +96,11 @@ export const api = {
 
   // Transaction History & Audit Log APIs
   getTransactionHistory: (contractId: string, limit = 50, offset = 0) =>
-    get<{ success: boolean; data: TransactionRecord[]; pagination: { limit: number; offset: number; total: number } }>(
-      `/history/${contractId}?limit=${limit}&offset=${offset}`,
-    ),
+    get<{
+      success: boolean;
+      data: TransactionRecord[];
+      pagination: { limit: number; offset: number; total: number };
+    }>(`/history/${contractId}?limit=${limit}&offset=${offset}`),
 
   getTransactionDetails: (txHash: string) =>
     get<{ success: boolean; data: TransactionDetails }>(
@@ -177,11 +176,6 @@ export const api = {
   getRoyaltyStats: (contractId: string) =>
     get<RoyaltyStats>(`/secondary-royalty/stats/${contractId}`),
 
-  getRoyaltyRate: (contractId: string) =>
-    get<{ contractId: string; royaltyRate: number }>(
-      `/secondary-royalty/rate/${contractId}`,
-    ),
-
   getSecondarySales: (
     contractId: string,
     limit = 50,
@@ -208,10 +202,21 @@ export const api = {
         status: string;
         initiatorAddress: string;
       }>;
-      total: number;
     }>(
       `/secondary-royalty/distributions/${contractId}?limit=${limit}&offset=${offset}`,
     ),
+
+  // NEW: Fetch secondary royalty pool balance
+  getSecondaryRoyaltyPool: (contractId: string) =>
+    get<{ poolBalance: string }>(`/secondary-royalty/pool/${contractId}`),
+
+  // NEW: Fetch contract status
+  getContractStatus: (contractId: string) =>
+    get<{ initialized: boolean }>(`/contract/status/${contractId}`),
+
+  // NEW: Fetch royalty rate from contract
+  getRoyaltyRate: (contractId: string) =>
+    get<{ royaltyRate: number }>(`/secondary-royalty/rate/${contractId}`),
 
   // Analytics API
   getAnalytics: (
@@ -243,11 +248,5 @@ export const api = {
       message?: string;
     }>(
       `/analytics/${contractId}${dateRange ? `?start=${dateRange.start}&end=${dateRange.end}` : ""}`,
-    ),
-
-  // Contract version API
-  getContractVersion: (contractId: string) =>
-    get<{ contractId: string; version: string }>(
-      `/contract/version/${contractId}`,
     ),
 };

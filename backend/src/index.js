@@ -13,7 +13,8 @@ import { secondaryRoyaltyRouter } from "./routes/secondary-royalty.js";
 import historyRouter from "./routes/history.js";
 import { analyticsRouter } from "./routes/analytics.js";
 import { contractRouter } from "./routes/contract.js";
-import { initializeDatabase, getMigrationVersion } from "./database.js";
+import { initializeDatabase, getMigrationVersion } from "./database/index.js";
+import db from "./database/index.js";
 
 // Initialize database on startup
 initializeDatabase();
@@ -38,12 +39,15 @@ app.use((req, res, next) => {
 // Security headers
 app.use(helmet());
 
+const corsPreflightMaxAge = parseInt(process.env.CORS_PREFLIGHT_MAX_AGE ?? "86400", 10);
+
 // CORS restricted to configured frontend origin
 app.use(
   cors({
     origin: process.env.FRONTEND_ORIGIN ?? "http://localhost:5173",
     methods: ["GET", "POST"],
-  }),
+    maxAge: Number.isNaN(corsPreflightMaxAge) ? 86400 : corsPreflightMaxAge,
+  })
 );
 
 // General rate limiter: 100 req / 15 min per IP (skips /api/health)
@@ -68,23 +72,47 @@ const writeLimiter = rateLimit({
 app.use(generalLimiter);
 app.use(express.json({ limit: "10kb" }));
 
-// Apply write limiter to mutating endpoints
-app.use("/api/initialize", writeLimiter);
-app.use("/api/distribute", writeLimiter);
-app.use("/api/secondary-royalty", writeLimiter);
+// Enforce Content-Type: application/json on POST requests
+app.use((req, res, next) => {
+  if (req.method === "POST" && !req.is("application/json")) {
+    return res.status(415).json({ error: "Content-Type must be application/json" });
+  }
+  next();
+});
 
-app.use("/api/initialize", initializeRouter);
-app.use("/api/distribute", distributeRouter);
-app.use("/api/collaborators", collaboratorsRouter);
-app.use("/api/secondary-royalty", secondaryRoyaltyRouter);
-app.use("/api", historyRouter);
-app.use("/api", analyticsRouter);
-app.use("/api/contract", contractRouter);
+// Per-request timeout middleware
+const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS ?? "30000");
+app.use((req, res, next) => {
+  const timer = setTimeout(() => {
+    if (!res.headersSent) {
+      res.status(503).json({ error: "Request timed out. Please try again later." });
+    }
+  }, REQUEST_TIMEOUT_MS);
+  res.on("finish", () => clearTimeout(timer));
+  res.on("close", () => clearTimeout(timer));
+  next();
+});
+
+// Apply write limiter to mutating endpoints
+app.use("/api/v1/initialize", writeLimiter);
+app.use("/api/v1/distribute", writeLimiter);
+app.use("/api/v1/secondary-royalty", writeLimiter);
+
+app.use("/api/v1/initialize", initializeRouter);
+app.use("/api/v1/distribute", distributeRouter);
+app.use("/api/v1/collaborators", collaboratorsRouter);
+app.use("/api/v1/secondary-royalty", secondaryRoyaltyRouter);
+app.use("/api/v1", historyRouter);
+app.use("/api/v1", analyticsRouter);
+app.use("/api/v1/contract", contractRouter);
 
 // Health check
-app.get("/api/health", (_req, res) =>
-  res.json({ ok: true, dbVersion: getMigrationVersion() }),
-);
+app.get("/api/v1/health", (_req, res) => res.json({ ok: true, dbVersion: getMigrationVersion() }));
+
+// Legacy /api/* redirect to /api/v1/*
+app.use("/api", (req, res) => {
+  res.redirect(308, `/api/v1${req.url}`);
+});
 
 // Central error handler
 app.use((err, _req, res, _next) => {
@@ -93,6 +121,41 @@ app.use((err, _req, res, _next) => {
 });
 
 const PORT = process.env.PORT ?? 3001;
-app.listen(PORT, () =>
-  logger.info(`API listening on http://localhost:${PORT}`),
-);
+const server = app.listen(PORT, () => logger.info(`API listening on http://localhost:${PORT}`));
+
+// Prevent hung connections from exhausting the connection pool
+server.keepAliveTimeout = parseInt(process.env.KEEP_ALIVE_TIMEOUT_MS ?? "35000");
+server.headersTimeout = parseInt(process.env.HEADERS_TIMEOUT_MS ?? "40000");
+
+// Graceful shutdown on SIGTERM (e.g. during deployment / container stop)
+const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS ?? "10000");
+
+process.on("SIGTERM", () => {
+  logger.info("SIGTERM received — starting graceful shutdown");
+
+  // Stop accepting new connections; wait for in-flight requests to finish.
+  server.close((err) => {
+    if (err) {
+      logger.error("Error while closing HTTP server", err);
+    } else {
+      logger.info("HTTP server closed");
+    }
+
+    // Close the SQLite connection (better-sqlite3 is synchronous).
+    try {
+      db.close();
+      logger.info("Database connection closed");
+    } catch (dbErr) {
+      logger.error("Error while closing database", dbErr);
+    }
+
+    logger.info("Graceful shutdown complete");
+    process.exit(err ? 1 : 0);
+  });
+
+  // Force-exit if in-flight requests don't drain in time.
+  setTimeout(() => {
+    logger.error(`Shutdown timeout (${SHUTDOWN_TIMEOUT_MS}ms) exceeded — forcing exit`);
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS).unref();
+});

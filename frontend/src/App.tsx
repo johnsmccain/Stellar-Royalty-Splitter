@@ -206,19 +206,24 @@ export default function App() {
     }
   };
 
+  function handleDisconnect() {
+    setWalletAddress(null);
+  }
+
   return (
     <div className="app-wrapper">
       <Navigation
         currentPage={currentPage}
         onPageChange={handlePageChange}
         walletAddress={walletAddress}
+        onDisconnect={handleDisconnect}
       />
 
       <div className="app-content">
         <div className="app-sidebar">
           <div className="sidebar-card">
             <h3>🔗 Wallet Connection</h3>
-            <WalletConnect onConnect={setWalletAddress} />
+            <WalletConnect walletAddress={walletAddress} onConnect={setWalletAddress} />
           </div>
 
           <div className="sidebar-card">

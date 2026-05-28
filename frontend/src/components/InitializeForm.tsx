@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { api } from "../api";
 import { signAndSubmitTransaction } from "../stellar";
+import { useNetwork } from "../context/NetworkContext";
 
 
 interface Collaborator {
@@ -21,6 +22,7 @@ export default function InitializeForm({
   walletAddress,
   onSuccess,
 }: Props) {
+  const { network } = useNetwork();
   const [collaborators, setCollaborators] = useState<Collaborator[]>([
     { address: "", basisPoints: "" },
   ]);
@@ -118,7 +120,7 @@ export default function InitializeForm({
       });
 
       setStatus({ type: "info", msg: "Signing transaction with Freighter..." });
-      const hash = await signAndSubmitTransaction(res.xdr);
+      const hash = await signAndSubmitTransaction(res.xdr, network);
 
       setStatus({ type: "info", msg: "Waiting for confirmation..." });
       await api.confirmTransaction(hash, {

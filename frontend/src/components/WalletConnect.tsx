@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 interface Props {
+  walletAddress: string | null;
   onConnect: (address: string | null) => void;
 }
 
@@ -15,8 +16,7 @@ declare global {
   }
 }
 
-export default function WalletConnect({ onConnect }: Props) {
-  const [address, setAddress] = useState<string | null>(null);
+export default function WalletConnect({ walletAddress, onConnect }: Props) {
   const [error, setError] = useState("");
   const [freighterMissing, setFreighterMissing] = useState(false);
 
@@ -32,7 +32,6 @@ export default function WalletConnect({ onConnect }: Props) {
 
     try {
       const { address: addr } = await window.freighter.requestAccess();
-      setAddress(addr);
       onConnect(addr);
     } catch {
       setError("Connection rejected. Please approve the request in Freighter.");
@@ -40,7 +39,6 @@ export default function WalletConnect({ onConnect }: Props) {
   }
 
   function disconnect() {
-    setAddress(null);
     setFreighterMissing(false);
     setError("");
     onConnect(null);
@@ -51,10 +49,10 @@ export default function WalletConnect({ onConnect }: Props) {
     <div className="card">
       <div className="wallet-row">
         <span className="badge">Wallet</span>
-        {address ? (
+        {walletAddress ? (
           <>
             <span className="wallet-addr">
-              {address.slice(0, 6)}...{address.slice(-4)}
+              {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}
             </span>
             <button className="btn-secondary" onClick={disconnect}>
               Disconnect

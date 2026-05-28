@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api } from "../api";
 import { useSettings } from "../context/SettingsContext";
 import { signAndSubmitTransaction } from "../stellar";
+import { useNetwork } from "../context/NetworkContext";
 
 
 interface Props {
@@ -16,6 +17,7 @@ export default function DistributeForm({
   onSuccess,
 }: Props) {
   const { settings } = useSettings();
+  const { network } = useNetwork();
   const [tokenId, setTokenId] = useState("");
   const [amount, setAmount] = useState("");
   const [status, setStatus] = useState<{
@@ -47,7 +49,7 @@ export default function DistributeForm({
       });
 
       setStatus({ type: "info", msg: "Signing transaction with Freighter..." });
-      const hash = await signAndSubmitTransaction(res.xdr);
+      const hash = await signAndSubmitTransaction(res.xdr, network);
 
       setStatus({ type: "info", msg: "Waiting for confirmation..." });
       await api.confirmTransaction(hash, {

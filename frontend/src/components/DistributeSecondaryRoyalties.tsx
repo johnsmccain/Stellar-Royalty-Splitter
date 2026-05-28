@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { api, RoyaltyStats } from "../api";
 import { signAndSubmitTransaction } from "../stellar";
+import { useNetwork } from "../context/NetworkContext";
 
 
 interface Props {
@@ -14,6 +15,7 @@ export default function DistributeSecondaryRoyalties({
   walletAddress,
   onSuccess,
 }: Props) {
+  const { network } = useNetwork();
   const [tokenId, setTokenId] = useState<string>("");
   const [status, setStatus] = useState<{
     type: "ok" | "error" | "info";
@@ -58,7 +60,7 @@ export default function DistributeSecondaryRoyalties({
       setStatus({ type: "info", msg: "Please sign the transaction..." });
 
       // Sign and submit transaction
-      const result = await signAndSubmitTransaction(xdr);
+      const result = await signAndSubmitTransaction(xdr, network);
 
       setStatus({ type: "info", msg: "Waiting for confirmation..." });
       await api.confirmTransaction(result, {

@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { api } from "../api";
 import { signAndSubmitTransaction } from "../stellar";
+import { useNetwork } from "../context/NetworkContext";
 
 
 interface Props {
@@ -18,6 +19,7 @@ export default function SecondaryRoyaltyConfig({
   onRateUpdate,
   initialRoyaltyRate,
 }: Props) {
+  const { network } = useNetwork();
   const [royaltyRate, setRoyaltyRate] = useState<string>(
     initialRoyaltyRate?.toString() ?? "500"
   );
@@ -59,8 +61,7 @@ export default function SecondaryRoyaltyConfig({
 
       setStatus({ type: "info", msg: "Please sign the transaction..." });
 
-      // Sign and submit transaction (this would require Freighter integration)
-      const result = await signAndSubmitTransaction(xdr);
+      const result = await signAndSubmitTransaction(xdr, network);
       
       setStatus({ type: "info", msg: "Waiting for confirmation..." });
       await api.confirmTransaction(result, {

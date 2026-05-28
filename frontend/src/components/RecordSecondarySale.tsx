@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { api } from "../api";
 import { signAndSubmitTransaction } from "../stellar";
+import { useNetwork } from "../context/NetworkContext";
 
 
 interface Props {
@@ -16,6 +17,7 @@ export default function RecordSecondarySale({
   royaltyRate,
   onSuccess,
 }: Props) {
+  const { network } = useNetwork();
   const [formData, setFormData] = useState({
     nftId: "",
     previousOwner: "",
@@ -78,7 +80,7 @@ export default function RecordSecondarySale({
       setStatus({ type: "info", msg: "Please sign the transaction..." });
 
       // Sign and submit transaction
-      const result = await signAndSubmitTransaction(xdr);
+      const result = await signAndSubmitTransaction(xdr, network);
 
       setStatus({ type: "info", msg: "Waiting for confirmation..." });
       await api.confirmTransaction(result, {

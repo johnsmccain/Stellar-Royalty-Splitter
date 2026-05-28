@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 
 interface Props {
+  walletAddress: string | null;
   onConnect: (address: string) => void;
   onDisconnect?: () => void;
 }
@@ -17,8 +18,7 @@ declare global {
   }
 }
 
-export default function WalletConnect({ onConnect, onDisconnect }: Props) {
-  const [address, setAddress] = useState<string | null>(null);
+export default function WalletConnect({ walletAddress, onConnect, onDisconnect }: Props) {
   const [error, setError] = useState("");
   const [freighterMissing, setFreighterMissing] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -27,7 +27,6 @@ export default function WalletConnect({ onConnect, onDisconnect }: Props) {
   useEffect(() => {
     if (!window.freighter?.on) return;
     window.freighter.on("accountChanged", ({ address: newAddr }) => {
-      setAddress(newAddr);
       onConnect(newAddr);
     });
   }, [onConnect]);
@@ -43,7 +42,6 @@ export default function WalletConnect({ onConnect, onDisconnect }: Props) {
 
     try {
       const { address: addr } = await window.freighter.requestAccess();
-      setAddress(addr);
       onConnect(addr);
     } catch {
       setError("Connection rejected. Please approve the request in Freighter.");
@@ -51,7 +49,6 @@ export default function WalletConnect({ onConnect, onDisconnect }: Props) {
   }
 
   function disconnect() {
-    setAddress(null);
     setFreighterMissing(false);
     setError("");
     setCopied(false);
@@ -60,8 +57,8 @@ export default function WalletConnect({ onConnect, onDisconnect }: Props) {
   }
 
   async function copyAddress() {
-    if (!address) return;
-    await navigator.clipboard.writeText(address);
+    if (!walletAddress) return;
+    await navigator.clipboard.writeText(walletAddress);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }
@@ -70,14 +67,14 @@ export default function WalletConnect({ onConnect, onDisconnect }: Props) {
     <div className="card">
       <div className="wallet-row">
         <span className="badge">Wallet</span>
-        {address ? (
+        {walletAddress ? (
           <>
             <button
               className="wallet-addr"
               onClick={copyAddress}
               title="Copy address"
             >
-              {address.slice(0, 6)}...{address.slice(-4)}
+              {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}
               <span className="copy-hint">{copied ? " ✓" : " 📋"}</span>
             </button>
             <button className="btn-secondary" onClick={disconnect}>

@@ -6,26 +6,44 @@
  */
 
 import { TransactionBuilder, Networks, SorobanRpc } from "@stellar/stellar-sdk";
+import type { Network } from "./context/NetworkContext";
 
-const RPC_URL = "https://soroban-testnet.stellar.org";
-const server = new SorobanRpc.Server(RPC_URL);
+const RPC_URLS: Record<Network, string> = {
+  testnet: "https://soroban-testnet.stellar.org",
+  mainnet: "https://soroban-mainnet.stellar.org",
+};
+
+const NETWORK_PASSPHRASES: Record<Network, string> = {
+  testnet: Networks.TESTNET,
+  mainnet: Networks.PUBLIC,
+};
+
+const FREIGHTER_NETWORK_NAMES: Record<Network, string> = {
+  testnet: "TESTNET",
+  mainnet: "PUBLIC",
+};
 
 /**
  * Sign and submit a transaction XDR with Freighter wallet
  */
 export async function signAndSubmitTransaction(
   xdrString: string,
+  network: Network = "testnet",
 ): Promise<string> {
   // @ts-ignore
   if (!window.freighter)
     throw new Error("Freighter wallet not found. Install it at freighter.app");
 
+  const passphrase = NETWORK_PASSPHRASES[network];
+  const rpcUrl = RPC_URLS[network];
+  const server = new SorobanRpc.Server(rpcUrl);
+
   // @ts-ignore
   const signedXdr = await window.freighter.signTransaction(xdrString, {
-    network: "TESTNET",
+    network: FREIGHTER_NETWORK_NAMES[network],
   });
 
-  const tx = TransactionBuilder.fromXDR(signedXdr, Networks.TESTNET);
+  const tx = TransactionBuilder.fromXDR(signedXdr, passphrase);
   const sendResult = await server.sendTransaction(tx);
 
   if (sendResult.status === "ERROR") {

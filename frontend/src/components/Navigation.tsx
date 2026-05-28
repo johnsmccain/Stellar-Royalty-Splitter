@@ -1,21 +1,25 @@
 import { useState, useEffect } from "react";
 import { useTheme } from "../context/ThemeContext";
+import { useNetwork } from "../context/NetworkContext";
 import "./Navigation.css";
 
 interface NavigationProps {
   currentPage: string;
   onPageChange: (page: string) => void;
   walletAddress: string | null;
+  onDisconnect: () => void;
 }
 
 export const Navigation: React.FC<NavigationProps> = ({
   currentPage,
   onPageChange,
   walletAddress,
+  onDisconnect,
 }) => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const { isDark, toggleTheme } = useTheme();
+  const { network, setNetwork } = useNetwork();
 
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: "📊" },
@@ -82,6 +86,19 @@ export const Navigation: React.FC<NavigationProps> = ({
         </ul>
 
         <div className="nav-wallet">
+          {/* Network toggle — issue #231 */}
+          <button
+            className={`network-toggle network-toggle--${network}`}
+            onClick={() => setNetwork(network === "testnet" ? "mainnet" : "testnet")}
+            aria-label={`Switch to ${network === "testnet" ? "mainnet" : "testnet"}`}
+            title={`Currently on ${network === "testnet" ? "Testnet" : "Mainnet"} — click to switch`}
+          >
+            <span className="network-dot" aria-hidden="true" />
+            <span className="network-label">
+              {network === "testnet" ? "Testnet" : "Mainnet"}
+            </span>
+          </button>
+
           <button
             className="theme-toggle"
             onClick={toggleTheme}
@@ -89,21 +106,40 @@ export const Navigation: React.FC<NavigationProps> = ({
           >
             {isDark ? "☀️" : "🌙"}
           </button>
-          {walletAddress && (
-            <>
-              <span className="wallet-info" title={walletAddress}>
-                {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}
-              </span>
-              <button
-                className="copy-address-btn"
-                onClick={copyAddress}
-                title="Copy full address"
-                aria-label="Copy wallet address"
-              >
-                {copied ? "✓" : "⧉"}
-              </button>
-            </>
-          )}
+
+          {/* Wallet status badge — issue #249 */}
+          <div
+            className={`wallet-status wallet-status--${walletAddress ? "connected" : "disconnected"}`}
+            aria-label={walletAddress ? `Wallet connected: ${walletAddress}` : "Wallet disconnected"}
+          >
+            <span className="wallet-status-dot" aria-hidden="true" />
+            {walletAddress ? (
+              <>
+                <span
+                  className="wallet-status-address"
+                  title={walletAddress}
+                  onClick={copyAddress}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => e.key === "Enter" && copyAddress()}
+                  aria-label={copied ? "Address copied" : "Click to copy wallet address"}
+                >
+                  {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}
+                  {copied && <span className="wallet-copied-indicator"> ✓</span>}
+                </span>
+                <button
+                  className="wallet-disconnect-btn"
+                  onClick={onDisconnect}
+                  aria-label="Disconnect wallet"
+                  title="Disconnect wallet"
+                >
+                  ✕
+                </button>
+              </>
+            ) : (
+              <span className="wallet-status-label">Disconnected</span>
+            )}
+          </div>
         </div>
       </div>
     </nav>

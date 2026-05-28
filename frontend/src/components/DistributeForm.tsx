@@ -1,8 +1,10 @@
-import React, { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { api } from "../api";
 import { signAndSubmitTransaction } from "../stellar";
+import { useNetwork } from "../context/NetworkContext";
 import FormStatus from "./FormStatus";
 import { useFormStatus } from "../hooks/useFormStatus";
+
 
 interface Props {
   contractId: string;
@@ -15,6 +17,7 @@ export default function DistributeForm({
   walletAddress,
   onSuccess,
 }: Props) {
+  const { network } = useNetwork();
   const [tokenId, setTokenId] = useState("");
   const [amount, setAmount] = useState("");
   const [contractBalance, setContractBalance] = useState<string | null>(null);
@@ -64,7 +67,7 @@ export default function DistributeForm({
       const res = await api.distribute({ contractId, walletAddress, tokenId });
 
       setStatus("info", "Signing transaction with Freighter...");
-      const hash = await signAndSubmitTransaction(res.xdr);
+      const hash = await signAndSubmitTransaction(res.xdr, network);
 
       setStatus("info", "Waiting for confirmation...");
       await api.confirmTransaction(hash, {

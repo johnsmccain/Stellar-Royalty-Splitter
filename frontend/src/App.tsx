@@ -3,15 +3,6 @@ import { Navigation } from "./components/Navigation";
 import HelpModal from "./components/HelpModal";
 import { useTheme } from "./context/ThemeContext";
 
-// Freighter is injected at runtime by the browser extension
-declare global {
-  interface Window {
-    freighter?: {
-      requestAccess: () => Promise<{ address: string }>;
-      getAddress: () => Promise<{ address: string }>;
-    };
-  }
-}
 import { Dashboard } from "./components/Dashboard";
 import { AdminDashboard } from "./components/AdminDashboard";
 import { Settings } from "./components/Settings";
@@ -147,7 +138,9 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [toggleTheme]);
 
-
+  function handleDisconnect() {
+    setWalletAddress(null);
+  }
 
   const renderPage = () => {
     switch (currentPage) {
@@ -268,6 +261,7 @@ export default function App() {
         currentPage={currentPage}
         onPageChange={handlePageChange}
         walletAddress={walletAddress}
+        onDisconnect={handleDisconnect}
       />
 
       <div className="app-content">
@@ -275,8 +269,9 @@ export default function App() {
           <div className="sidebar-card">
             <h3>🔗 Wallet Connection</h3>
             <WalletConnect
+              walletAddress={walletAddress}
               onConnect={setWalletAddress}
-              onDisconnect={() => setWalletAddress(null)}
+              onDisconnect={handleDisconnect}
             />
           </div>
 

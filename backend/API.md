@@ -122,3 +122,22 @@ See route module `src/routes/secondary-royalty.js` for pool, sales, and distribu
 
 - `GET /api/v1/history/:contractId`
 - `GET /api/v1/analytics/:contractId`
+
+## Operational configuration
+
+The Soroban RPC and Horizon clients are configurable via the following
+environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SOROBAN_RPC_URL` | `https://soroban-testnet.stellar.org` | Soroban RPC endpoint |
+| `HORIZON_URL` | `https://horizon-testnet.stellar.org` | Horizon endpoint (used for fee stats and connectivity probes) |
+| `STELLAR_NETWORK` | `testnet` | `testnet` or `mainnet` |
+| `SOROBAN_RPC_TIMEOUT_MS` | `10000` | Per-call timeout for Soroban RPC (#273). On timeout the route returns HTTP 504 with `Soroban RPC timed out after Nms`. |
+| `HORIZON_TIMEOUT_MS` | `10000` | Per-call timeout for Horizon (fee fetch + health probe). |
+| `HORIZON_FEE_CACHE_MS` | `30000` | How long the recommended fee (#274) is cached before re-fetching. |
+| `HEALTH_CHECK_TIMEOUT_MS` | `5000` | Timeout for the `/health` Horizon connectivity probe. |
+
+When the fee fetch fails the backend falls back to `BASE_FEE` (`100` stroops) so transaction submission keeps working.
+
+Transactions built via `retryBuildTx` refresh the account sequence (#275) on every attempt; retries never reuse a stale sequence.

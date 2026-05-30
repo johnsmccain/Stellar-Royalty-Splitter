@@ -3,10 +3,10 @@ use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, MockAuth, MockAuthInvoke},
     token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, Env, IntoVal, Map, String, Vec as SorobanVec,
+    vec, Address, BytesN, Env, IntoVal, Map, String, Vec as SorobanVec,
 };
 use stellar_royalty_splitter::{
-    auth, DataKey, Recipient, RoyaltySplitterClient, StorageKey, VERSION,
+    auth, DataKey, Recipient, RoyaltySplitterClient, StorageKey, MIN_TTL, VERSION,
 };
 
 fn setup(env: &Env) -> (Address, RoyaltySplitterClient) {
@@ -175,13 +175,55 @@ fn test_ttl_extended_after_ledger_advance() {
 
     // Advance ledger sequence past MIN_TTL (17_280 ledgers).
     env.ledger()
-        .set_sequence_number(env.ledger().sequence() + 17_281);
+        .set_sequence_number(env.ledger().sequence() + MIN_TTL as u32 + 1);
 
     // Both read functions must still return correct data (TTL was extended).
     let collaborators = client.get_collaborators();
     assert_eq!(collaborators.len(), 2);
     assert_eq!(client.get_share(&a), 6000);
     assert_eq!(client.get_share(&b), 4000);
+}
+
+/// Issue #289 — state-writing entrypoints must extend TTL so writes succeed
+/// after the ledger advances past MIN_TTL.
+#[test]
+fn test_ttl_state_writes_after_ledger_advance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = make_token(&env, &token_admin);
+
+    client.initialize(
+        &vec![&env, admin.clone(), b.clone()],
+        &vec![&env, 5000_u32, 5000_u32],
+    );
+    client.set_royalty_rate(&500_u32);
+
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + MIN_TTL as u32 + 1);
+
+    client.set_royalty_rate(&750_u32);
+    assert_eq!(client.get_royalty_rate(), 750);
+
+    client.pause();
+    assert!(client.is_paused());
+    client.unpause();
+    assert!(!client.is_paused());
+
+    client.update_share(&b, &6000_u32);
+    client.update_share(&admin, &4000_u32);
+
+    mint(&env, &token, &contract_id, 1000);
+    client.distribute(&token);
+    assert!(client.get_last_distribution().is_some());
+    assert_eq!(client.get_distribute_count(), 1);
+
+    client.record_secondary_royalty(&token, &admin, &100_i128);
+    assert_eq!(client.get_secondary_pool(), 100);
 }
 
 /// Events — distribute emits a ("royalty", "dist_all") event with (token, amount).
@@ -1223,11 +1265,11 @@ fn test_set_default_recipients_emits_event() {
                 == vec![
                     &env,
                     symbol_short!("default").into_val(&env),
-                    symbol_short!("recip_set").into_val(&env),
+                    symbol_short!("rcpt_set").into_val(&env),
                 ]
             && data == 2_u32.into_val(&env)
     });
-    assert!(found, "recip_set event not emitted");
+    assert!(found, "rcpt_set event not emitted");
 }
 
 /// Test get_default_recipients returns empty when not set
@@ -1876,6 +1918,87 @@ fn test_get_version_before_initialize_panics() {
     env.mock_all_auths();
     let (_, client) = setup(&env);
     client.get_version();
+}
+
+// ── Issue #287: update_wasm ─────────────────────────────────────────────────
+
+const CONTRACT_WASM: &[u8] =
+    include_bytes!("../target/wasm32-unknown-unknown/release/stellar_royalty_splitter.wasm");
+
+fn upload_contract_wasm(env: &Env) -> BytesN<32> {
+    env.deployer().upload_contract_wasm(CONTRACT_WASM)
+}
+
+#[test]
+fn test_update_wasm_preserves_state() {
+    let env = Env::default();
+    let (contract_id, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = make_token(&env, &token_admin);
+
+    env.mock_all_auths();
+    client.initialize(
+        &vec![&env, admin.clone(), b.clone()],
+        &vec![&env, 6000_u32, 4000_u32],
+    );
+    client.pause();
+
+    let wasm_hash = upload_contract_wasm(&env);
+
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "update_wasm",
+            args: (&wasm_hash,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.update_wasm(&wasm_hash);
+
+    assert_eq!(read_admin(&env, &contract_id), admin);
+    assert_eq!(client.get_share(&admin), 6000);
+    assert_eq!(client.get_share(&b), 4000);
+    assert_eq!(client.get_version(), String::from_str(&env, VERSION));
+    assert!(client.is_paused());
+
+    mint(&env, &token, &contract_id, 1000);
+    env.mock_all_auths();
+    client.distribute(&token);
+    assert_eq!(TokenClient::new(&env, &token).balance(&admin), 600);
+    assert_eq!(TokenClient::new(&env, &token).balance(&b), 400);
+}
+
+#[test]
+#[should_panic]
+fn test_update_wasm_requires_admin_auth() {
+    let env = Env::default();
+    let (contract_id, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&vec![&env, admin, b], &vec![&env, 5000_u32, 5000_u32]);
+
+    let wasm_hash = upload_contract_wasm(&env);
+
+    // No mock auths for update_wasm — must panic on require_auth
+    client.update_wasm(&wasm_hash);
+}
+
+#[test]
+#[should_panic(expected = "contract not initialized")]
+fn test_update_wasm_before_initialize_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, client) = setup(&env);
+
+    let wasm_hash = upload_contract_wasm(&env);
+    client.update_wasm(&wasm_hash);
 }
 
 // ── Issue #288: set_recipients ──────────────────────────────────────────────

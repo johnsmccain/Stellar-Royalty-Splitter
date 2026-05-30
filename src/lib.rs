@@ -3,7 +3,8 @@ pub mod auth;
 mod storage;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map, String, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, Map, String,
+    Vec,
 };
 
 #[contracttype]
@@ -34,8 +35,7 @@ pub enum StorageKey {
 /// Backward-compatible alias for integration tests and external references.
 pub type DataKey = StorageKey;
 
-const MIN_TTL: u32 = 17_280;
-const MAX_TTL: u32 = 34_560;
+pub use storage::MIN_TTL;
 
 /// On-chain contract version in [semantic versioning](https://semver.org/) format
 /// (`MAJOR.MINOR.PATCH`, e.g. `"0.1.0"`).
@@ -59,10 +59,8 @@ impl RoyaltySplitter {
     /// the admin and must authorize this transaction.
     ///
     /// # Arguments
-    /// * `collaborators` - Ordered list of wallet addresses that will receive payouts.
-    ///   The first address is designated as admin. Maximum of 10 recipients allowed.
-    /// * `shares` - Basis-point allocations corresponding to each collaborator
-    ///   (1 bp = 0.01%). Must sum to exactly 10,000 (100%).
+    /// * `collaborators` - Recipient wallet addresses; first is admin (max 10).
+    /// * `shares` - Basis-point allocations per collaborator (must sum to 10,000).
     ///
     /// # Authorization
     /// Requires signature from `collaborators[0]` (the admin).
@@ -70,7 +68,7 @@ impl RoyaltySplitter {
     /// # Panics
     /// On invalid collaborators/shares, duplicate addresses, or re-initialization.
     pub fn initialize(env: Env, collaborators: Vec<Address>, shares: Vec<u32>) {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
 
         if env.storage().instance().has(&StorageKey::Admin) {
             panic!("already initialized");
@@ -126,18 +124,12 @@ impl RoyaltySplitter {
         // an invalid or uncontrolled address from taking admin control (#264).
         admin.require_auth();
 
-        env.storage().instance().set(&StorageKey::Admin, &admin);
-        env.storage()
-            .instance()
-            .set(&StorageKey::Collaborators, &collaborators);
-        env.storage()
-            .instance()
-            .set(&StorageKey::ShareMap, &share_map);
+        storage::instance_set(&env, &StorageKey::Admin, &admin);
+        storage::instance_set(&env, &StorageKey::Collaborators, &collaborators);
+        storage::instance_set(&env, &StorageKey::ShareMap, &share_map);
 
         let version = String::from_str(&env, VERSION);
-        env.storage()
-            .instance()
-            .set(&StorageKey::ContractVersion, &version);
+        storage::instance_set(&env, &StorageKey::ContractVersion, &version);
 
         env.events().publish(
             (symbol_short!("royalty"), symbol_short!("init")),
@@ -158,7 +150,7 @@ impl RoyaltySplitter {
     /// * `"contract not initialized"` — called before `initialize`
     /// * `"royalty rate cannot exceed 10000 basis points"` — `new_rate > 10_000`
     pub fn set_royalty_rate(env: Env, new_rate: u32) {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
 
         let admin: Address = env
             .storage()
@@ -176,9 +168,7 @@ impl RoyaltySplitter {
             panic!("royalty rate cannot exceed 10000 basis points");
         }
 
-        env.storage()
-            .instance()
-            .set(&StorageKey::RoyaltyRate, &new_rate);
+        storage::instance_set(&env, &StorageKey::RoyaltyRate, &new_rate);
 
         env.events().publish(
             (symbol_short!("royalty"), symbol_short!("rate_set")),
@@ -197,7 +187,7 @@ impl RoyaltySplitter {
     /// # Panics
     /// * `"contract not initialized"` — called before `initialize`
     pub fn pause(env: Env) {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
 
         let admin: Address = env
             .storage()
@@ -206,7 +196,7 @@ impl RoyaltySplitter {
             .expect("contract not initialized");
 
         auth::require_admin(&env, &admin, auth::msg::PAUSE_ADMIN);
-        env.storage().instance().set(&StorageKey::Paused, &true);
+        storage::instance_set(&env, &StorageKey::Paused, &true);
     }
 
     /// Transfer admin rights to a new address.
@@ -220,7 +210,7 @@ impl RoyaltySplitter {
     /// # Panics
     /// * `"contract not initialized"` — called before `initialize`
     pub fn admin_transfer(env: Env, new_admin: Address) {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
 
         let admin: Address = env
             .storage()
@@ -231,7 +221,7 @@ impl RoyaltySplitter {
         auth::require_admin(&env, &admin, auth::msg::ADMIN_TRANSFER_ADMIN);
 
         let previous_admin = admin.clone();
-        env.storage().instance().set(&StorageKey::Admin, &new_admin);
+        storage::instance_set(&env, &StorageKey::Admin, &new_admin);
 
         env.events().publish(
             (symbol_short!("royalty"), symbol_short!("admin_xfr")),
@@ -247,7 +237,7 @@ impl RoyaltySplitter {
     /// # Panics
     /// * `"contract not initialized"` — called before `initialize`
     pub fn unpause(env: Env) {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
 
         let admin: Address = env
             .storage()
@@ -256,13 +246,41 @@ impl RoyaltySplitter {
             .expect("contract not initialized");
 
         auth::require_admin(&env, &admin, auth::msg::UNPAUSE_ADMIN);
-        env.storage().instance().set(&StorageKey::Paused, &false);
+        storage::instance_set(&env, &StorageKey::Paused, &false);
+    }
+
+    /// Replace the contract's executable WASM while preserving instance storage.
+    ///
+    /// The Wasm blob identified by `wasm_hash` must already be uploaded to the
+    /// ledger. The upgrade takes effect after the current transaction completes;
+    /// existing storage entries are unchanged.
+    ///
+    /// # Arguments
+    /// * `wasm_hash` - SHA-256 hash of the uploaded replacement Wasm.
+    ///
+    /// # Authorization
+    /// Requires admin signature.
+    ///
+    /// # Panics
+    /// * `"contract not initialized"` — called before `initialize`
+    pub fn update_wasm(env: Env, wasm_hash: BytesN<32>) {
+        storage::extend_instance_ttl(&env);
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .expect("contract not initialized");
+
+        auth::require_admin(&env, &admin, auth::msg::UPDATE_WASM_ADMIN);
+
+        env.deployer().update_current_contract_wasm(wasm_hash);
     }
 
     /// Returns `true` if the contract is currently paused, `false` otherwise.
     /// Defaults to `false` before `pause` is ever called.
     pub fn is_paused(env: Env) -> bool {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         env.storage()
             .instance()
             .get(&StorageKey::Paused)
@@ -274,7 +292,7 @@ impl RoyaltySplitter {
     /// Safe to call at any time — does not require initialization.
     /// Extends TTL on every call so the storage entry stays live.
     pub fn is_initialized(env: Env) -> bool {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         env.storage().instance().has(&StorageKey::Admin)
     }
 
@@ -285,7 +303,7 @@ impl RoyaltySplitter {
     /// # Panics
     /// * `"contract not initialized"` — called before `initialize`
     pub fn get_admin(env: Env) -> Address {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         env.storage()
             .instance()
             .get(&StorageKey::Admin)
@@ -297,7 +315,7 @@ impl RoyaltySplitter {
     /// # Arguments
     /// * `token` - The token contract address to query.
     pub fn get_balance(env: Env, token: Address) -> i128 {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         token::Client::new(&env, &token).balance(&env.current_contract_address())
     }
 
@@ -310,7 +328,7 @@ impl RoyaltySplitter {
     /// # Authorization
     /// Requires admin signature.
     pub fn set_default_recipients(env: Env, recipients: Vec<Recipient>) {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
 
         let admin: Address = env
             .storage()
@@ -321,12 +339,10 @@ impl RoyaltySplitter {
         auth::require_admin(&env, &admin, auth::msg::SET_DEFAULT_RECIPIENTS_ADMIN);
         Self::validate_recipient_list(&env, &recipients);
 
-        env.storage()
-            .instance()
-            .set(&StorageKey::DefaultRecipients, &recipients);
+        storage::instance_set(&env, &StorageKey::DefaultRecipients, &recipients);
 
         env.events().publish(
-            (symbol_short!("default"), symbol_short!("recip_set")),
+            (symbol_short!("default"), symbol_short!("rcpt_set")),
             recipients.len(),
         );
     }
@@ -339,7 +355,7 @@ impl RoyaltySplitter {
     /// # Authorization
     /// Requires admin signature.
     pub fn set_recipients(env: Env, recipients: Vec<Recipient>) {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
 
         let admin: Address = env
             .storage()
@@ -359,12 +375,8 @@ impl RoyaltySplitter {
             share_map.set(recipient.address.clone(), recipient.share);
         }
 
-        env.storage()
-            .instance()
-            .set(&StorageKey::Collaborators, &collaborators);
-        env.storage()
-            .instance()
-            .set(&StorageKey::ShareMap, &share_map);
+        storage::instance_set(&env, &StorageKey::Collaborators, &collaborators);
+        storage::instance_set(&env, &StorageKey::ShareMap, &share_map);
 
         env.events().publish(
             (symbol_short!("royalty"), symbol_short!("recip_set")),
@@ -380,7 +392,7 @@ impl RoyaltySplitter {
     /// # Authorization
     /// Requires admin signature.
     pub fn withdraw(env: Env, token: Address, amount: i128) {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
 
         let admin: Address = env
             .storage()
@@ -413,7 +425,7 @@ impl RoyaltySplitter {
     /// Returns the configured default recipient list, or an empty vec if none has been set.
     /// Safe to call before initialization or when no defaults are configured.
     pub fn get_default_recipients(env: Env) -> Vec<Recipient> {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         env.storage()
             .instance()
             .get(&StorageKey::DefaultRecipients)
@@ -440,7 +452,7 @@ impl RoyaltySplitter {
     /// * `"no balance to distribute"` — contract has zero balance of the token
     /// * `"contract is paused"` — contract is currently paused
     pub fn distribute_with_override(env: Env, token: Address, override_recipients: Vec<Recipient>) {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
 
         let admin: Address = env
             .storage()
@@ -551,9 +563,11 @@ impl RoyaltySplitter {
             (token, amount),
         );
 
-        env.storage()
-            .instance()
-            .set(&StorageKey::LastDistribution, &env.ledger().timestamp());
+        storage::instance_set(
+            &env,
+            &StorageKey::LastDistribution,
+            &env.ledger().timestamp(),
+        );
 
         // Increment distribute history counter with overflow safety
         let current_count: u64 = env
@@ -564,9 +578,7 @@ impl RoyaltySplitter {
 
         // Use saturating add to prevent overflow - will cap at u64::MAX
         let new_count = current_count.saturating_add(1);
-        env.storage()
-            .instance()
-            .set(&StorageKey::DistributeHistory, &new_count);
+        storage::instance_set(&env, &StorageKey::DistributeHistory, &new_count);
     }
 
     /// Get the total number of successful royalty distributions.
@@ -577,7 +589,7 @@ impl RoyaltySplitter {
     ///
     /// Safe to call at any time — returns 0 if no distributions have occurred.
     pub fn get_distribute_count(env: Env) -> u64 {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         env.storage()
             .instance()
             .get(&StorageKey::DistributeHistory)
@@ -619,7 +631,7 @@ impl RoyaltySplitter {
     /// # Authorization
     /// Requires signature from `from`.
     pub fn record_secondary_royalty(env: Env, token: Address, from: Address, royalty_amount: i128) {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         auth::require_payer(&env, &from, auth::msg::RECORD_SECONDARY_PAYER);
 
         let token_client = token::Client::new(&env, &token);
@@ -637,13 +649,13 @@ impl RoyaltySplitter {
             .get(&StorageKey::SecondaryPool)
             .unwrap_or(0);
 
-        env.storage()
-            .instance()
-            .set(&StorageKey::SecondaryPool, &(current_pool + royalty_amount));
+        storage::instance_set(
+            &env,
+            &StorageKey::SecondaryPool,
+            &(current_pool + royalty_amount),
+        );
 
-        env.storage()
-            .instance()
-            .set(&StorageKey::SecondaryToken, &token);
+        storage::instance_set(&env, &StorageKey::SecondaryToken, &token);
     }
 
     /// Distribute all accumulated secondary royalties to collaborators.
@@ -663,7 +675,7 @@ impl RoyaltySplitter {
     /// * `"total shares must sum to 10000"` — share map does not total 100%
     /// * `"pool exceeds contract balance"` — pool accounting is inconsistent
     pub fn distribute_secondary_royalties(env: Env) {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
 
         let admin: Address = env
             .storage()
@@ -743,16 +755,15 @@ impl RoyaltySplitter {
                 .publish((symbol_short!("sec_dist"),), (addr, payout));
         }
 
-        env.storage()
-            .instance()
-            .set(&StorageKey::SecondaryPool, &0_i128);
+        storage::instance_set(&env, &StorageKey::SecondaryPool, &0_i128);
 
         env.events().publish(
             (symbol_short!("royalty"), symbol_short!("sec_dist")),
             (token, pool),
         );
 
-        env.storage().instance().set(
+        storage::instance_set(
+            &env,
             &StorageKey::LastSecondaryDistribution,
             &env.ledger().timestamp(),
         );
@@ -772,7 +783,7 @@ impl RoyaltySplitter {
     /// # Panics
     /// * `"sale price must be positive"` — `sale_price <= 0`
     pub fn record_secondary_sale(env: Env, sale_price: i128) -> i128 {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
 
         if sale_price <= 0 {
             panic!("sale price must be positive");
@@ -790,7 +801,7 @@ impl RoyaltySplitter {
     /// Returns the current secondary royalty rate in basis points (0–10,000).
     /// Returns 0 if `set_royalty_rate` has never been called.
     pub fn get_royalty_rate(env: Env) -> u32 {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         env.storage()
             .instance()
             .get(&StorageKey::RoyaltyRate)
@@ -803,7 +814,7 @@ impl RoyaltySplitter {
     /// Preserves the insertion order from `initialize`. Returns an empty vec if
     /// called before initialization.
     pub fn get_recipients(env: Env) -> Vec<Recipient> {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
 
         let collaborators: Vec<Address> = env
             .storage()
@@ -834,7 +845,7 @@ impl RoyaltySplitter {
     /// # Panics
     /// * `"contract not initialized"` — called before `initialize`
     pub fn get_version(env: Env) -> String {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         env.storage()
             .instance()
             .get(&StorageKey::ContractVersion)
@@ -850,7 +861,7 @@ impl RoyaltySplitter {
     /// * `"contract not initialized"` — called before `initialize`
     /// * `"collaborator not found"` — address is not a registered collaborator
     pub fn get_share(env: Env, collaborator: Address) -> u32 {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         let share_map: Map<Address, u32> = env
             .storage()
             .instance()
@@ -865,7 +876,7 @@ impl RoyaltySplitter {
     /// # Authorization
     /// Requires admin signature
     pub fn update_share(env: Env, collaborator: Address, new_share: u32) {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
 
         let admin: Address = env
             .storage()
@@ -898,9 +909,7 @@ impl RoyaltySplitter {
         }
 
         share_map.set(collaborator.clone(), new_share);
-        env.storage()
-            .instance()
-            .set(&StorageKey::ShareMap, &share_map);
+        storage::instance_set(&env, &StorageKey::ShareMap, &share_map);
 
         env.events().publish(
             (symbol_short!("share"), symbol_short!("updated")),
@@ -915,7 +924,7 @@ impl RoyaltySplitter {
     /// # Arguments
     /// * `addr` - Address to check.
     pub fn is_collaborator(env: Env, addr: Address) -> bool {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         let share_map: Map<Address, u32> = env
             .storage()
             .instance()
@@ -928,7 +937,7 @@ impl RoyaltySplitter {
     /// Returns the number of registered collaborators.
     /// Returns 0 if called before initialization.
     pub fn collaborator_count(env: Env) -> u32 {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         let collaborators: Vec<Address> = env
             .storage()
             .instance()
@@ -940,7 +949,7 @@ impl RoyaltySplitter {
     /// Returns the ordered list of all registered collaborator addresses.
     /// Returns an empty vec if called before initialization.
     pub fn get_collaborators(env: Env) -> Vec<Address> {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         env.storage()
             .instance()
             .get(&StorageKey::Collaborators)
@@ -949,7 +958,7 @@ impl RoyaltySplitter {
 
     /// Returns the full share map (Address → basis points) in a single call.
     pub fn get_all_shares(env: Env) -> Map<Address, u32> {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         env.storage()
             .instance()
             .get(&StorageKey::ShareMap)
@@ -959,7 +968,7 @@ impl RoyaltySplitter {
     /// Returns the current size of the secondary royalty pool (undistributed amount).
     /// Returns 0 if no royalties have been recorded yet.
     pub fn get_secondary_pool(env: Env) -> i128 {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         env.storage()
             .instance()
             .get(&StorageKey::SecondaryPool)
@@ -968,13 +977,13 @@ impl RoyaltySplitter {
 
     /// Returns the timestamp of the last primary distribution, or None if never distributed.
     pub fn get_last_distribution(env: Env) -> Option<u64> {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         env.storage().instance().get(&StorageKey::LastDistribution)
     }
 
     /// Returns the timestamp of the last secondary distribution, or None if never distributed.
     pub fn get_last_secondary_distribution(env: Env) -> Option<u64> {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         env.storage()
             .instance()
             .get(&StorageKey::LastSecondaryDistribution)
@@ -988,7 +997,7 @@ impl RoyaltySplitter {
     /// # Panics
     /// * `"contract not initialized"` — called before `initialize`
     pub fn get_total_shares(env: Env) -> u32 {
-        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+        storage::extend_instance_ttl(&env);
         let share_map: Map<Address, u32> = env
             .storage()
             .instance()

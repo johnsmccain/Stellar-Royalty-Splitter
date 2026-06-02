@@ -21,8 +21,15 @@ export const initializeSchema = z
   .refine((d) => d.collaborators.length === d.shares.length, {
     message: "collaborators and shares must be the same length",
   })
-  .refine((d) => d.shares.reduce((a, b) => a + b, 0) === 10000, {
-    message: "shares must sum to 10000 basis points",
+  .superRefine((d, ctx) => {
+    const actual = d.shares.reduce((a, b) => a + b, 0);
+    if (actual !== 10000) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["shares"],
+        message: `shares must sum to 10000 basis points (got ${actual}, expected 10000)`,
+      });
+    }
   });
 
 export const distributeSchema = z.object({

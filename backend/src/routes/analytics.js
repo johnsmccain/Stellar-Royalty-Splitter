@@ -1,8 +1,8 @@
 import express from "express";
 import db from "../database/index.js";
 import { createRequestLogger } from "../logger.js";
-import { validateContractIdMiddleware } from "../validation.js";
-import { sendError } from "../error-response.js";
+import { validateContractIdMiddleware, analyticsQuerySchema } from "../validation.js";
+import { sendError, sendValidationError } from "../error-response.js";
 
 // Simple in-memory cache with TTL
 const cache = new Map();
@@ -13,7 +13,19 @@ const router = express.Router();
 router.get("/analytics/:contractId", validateContractIdMiddleware, (req, res) => {
   const log = createRequestLogger(req);
   const { contractId } = req.params;
-  const { start, end } = req.query;
+
+  const queryResult = analyticsQuerySchema.safeParse(req.query);
+  if (!queryResult.success) {
+    return sendValidationError(
+      res,
+      queryResult.error.issues.map((e) => ({
+        field: e.path.join(".") || "query",
+        message: e.message,
+      }))
+    );
+  }
+
+  const { start, end, collaboratorLimit = 10 } = queryResult.data;
 
   try {
     // Parse date range
@@ -23,21 +35,14 @@ router.get("/analytics/:contractId", validateContractIdMiddleware, (req, res) =>
     // Validate parsed dates
     if (start && isNaN(startDate.getTime())) {
       log.warn("analytics invalid start date", { contractId, start });
-      return res.status(400).json({ success: false, error: "Invalid start date. Use YYYY-MM-DD." });
-    }
-    if (end && isNaN(endDate.getTime())) {
-      log.warn("analytics invalid end date", { contractId, end });
-      return res.status(400).json({ success: false, error: "Invalid end date. Use YYYY-MM-DD." });
-    }
-    if (start && end && startDate > endDate) {
-      log.warn("analytics start date after end date", { contractId, start, end });
-      return res.status(400).json({ success: false, error: "start date must be before end date." });
       return sendError(res, 400, "invalid_query_parameter", "Invalid start date. Use YYYY-MM-DD.");
     }
     if (end && isNaN(endDate.getTime())) {
+      log.warn("analytics invalid end date", { contractId, end });
       return sendError(res, 400, "invalid_query_parameter", "Invalid end date. Use YYYY-MM-DD.");
     }
     if (start && end && startDate > endDate) {
+      log.warn("analytics start date after end date", { contractId, start, end });
       return sendError(res, 400, "invalid_query_parameter", "start date must be before end date.");
     }
 
@@ -116,9 +121,10 @@ router.get("/analytics/:contractId", validateContractIdMiddleware, (req, res) =>
         WHERE t.contractId = ? AND t.status = 'confirmed'
           AND t.timestamp BETWEEN ? AND ?
         GROUP BY dp.collaboratorAddress
-        ORDER BY totalEarned DESC`
+        ORDER BY totalEarned DESC
+        LIMIT ?`
       )
-      .all(contractId, startDate.toISOString(), endDate.toISOString());
+      .all(contractId, startDate.toISOString(), endDate.toISOString(), collaboratorLimit);
 
     log.info("analytics query completed", {
       contractId,
@@ -158,8 +164,6 @@ router.get("/analytics/:contractId", validateContractIdMiddleware, (req, res) =>
       error: error.message ?? String(error),
       stack: error.stack,
     });
-    res.status(500).json({ success: false, message: "Failed to load analytics data" });
-    logger.error("Analytics error:", error);
     sendError(res, 500, "analytics_fetch_failed", "Failed to load analytics data");
   }
 });

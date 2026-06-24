@@ -15,13 +15,14 @@ export async function buildAndRecordTransaction({
   contractId,
   walletAddress,
   transactionType,
+  contractMethod,
   scvlArgs,
   auditAction,
   auditMetadata,
   transactionMetadata = {},
   correlationId,
 }) {
-  // Record transaction in database for audit trail
+  const method = contractMethod ?? transactionType;
   const transactionId = recordTransaction(
     contractId,
     transactionType,
@@ -29,11 +30,10 @@ export async function buildAndRecordTransaction({
     transactionMetadata
   );
 
-  // Build the transaction XDR — pass correlationId for RPC tracing
   const txXdr = await retryBuildTx(
     walletAddress,
     contractId,
-    transactionType,
+    method,
     scvlArgs,
     correlationId,
   );
